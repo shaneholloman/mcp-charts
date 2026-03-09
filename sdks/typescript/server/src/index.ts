@@ -4,18 +4,12 @@ import {
   type HTMLTextContent,
   type MimeType,
   RESOURCE_MIME_TYPE,
-  type UIActionResult,
-  type UIActionResultLink,
-  type UIActionResultNotification,
-  type UIActionResultPrompt,
-  type UIActionResultIntent,
-  type UIActionResultToolCall,
 } from './types.js';
 import {
+  extractOrigin,
+  fetchExternalUrl,
   getAdditionalResourceProps,
   utf8ToBase64,
-  wrapHtmlWithAdapters,
-  getAdapterMimeType,
 } from './utils.js';
 
 export type UIResource = {
@@ -29,53 +23,56 @@ export type UIResource = {
  * Creates a UIResource.
  * This is the object that should be included in the 'content' array of a toolResult.
  *
+ * For `externalUrl` content, fetches the URL's HTML and injects a `<base>` tag
+ * so that relative paths resolve against the original URL.
+ *
  * @param options Configuration for the interactive resource.
- * @returns a UIResource
+ * @returns a UIResource (async for externalUrl content which requires fetching)
  */
-export function createUIResource(options: CreateUIResourceOptions): UIResource {
+export async function createUIResource(options: CreateUIResourceOptions): Promise<UIResource> {
   let actualContentString: string;
-  let mimeType: MimeType;
+  const mimeType: MimeType = RESOURCE_MIME_TYPE;
+
+  if (!options.uri.startsWith('ui://')) {
+    throw new Error("MCP-UI SDK: URI must start with 'ui://'.");
+  }
+
+  let externalOrigin: string | undefined;
 
   if (options.content.type === 'rawHtml') {
-    if (!options.uri.startsWith('ui://')) {
-      throw new Error("MCP-UI SDK: URI must start with 'ui://' when content.type is 'rawHtml'.");
-    }
     actualContentString = options.content.htmlString;
     if (typeof actualContentString !== 'string') {
       throw new Error(
         "MCP-UI SDK: content.htmlString must be provided as a string when content.type is 'rawHtml'.",
       );
     }
-
-    // Wrap with adapters if any are enabled
-    if (options.adapters) {
-      actualContentString = wrapHtmlWithAdapters(actualContentString, options.adapters);
-      // Use adapter's mime type if provided, otherwise fall back to MCP Apps standard
-      mimeType = (getAdapterMimeType(options.adapters) as MimeType) ?? RESOURCE_MIME_TYPE;
-    } else {
-      // Default to MCP Apps standard MIME type
-      mimeType = RESOURCE_MIME_TYPE;
-    }
   } else if (options.content.type === 'externalUrl') {
-    if (!options.uri.startsWith('ui://')) {
-      throw new Error(
-        "MCP-UI SDK: URI must start with 'ui://' when content.type is 'externalUrl'.",
-      );
-    }
     const iframeUrl = options.content.iframeUrl;
     if (typeof iframeUrl !== 'string') {
       throw new Error(
         "MCP-UI SDK: content.iframeUrl must be provided as a string when content.type is 'externalUrl'.",
       );
     }
-    actualContentString = iframeUrl;
-    // externalUrl now uses the same MIME type as rawHtml - hosts that support
-    // external URLs will detect the URL content and handle it appropriately
-    mimeType = RESOURCE_MIME_TYPE;
+    actualContentString = await fetchExternalUrl(iframeUrl);
+    externalOrigin = extractOrigin(iframeUrl);
   } else {
     // This case should ideally be prevented by TypeScript's discriminated union checks
     const exhaustiveCheckContent: never = options.content;
     throw new Error(`MCP-UI SDK: Invalid content.type specified: ${exhaustiveCheckContent}`);
+  }
+
+  const additionalProps = getAdditionalResourceProps(options);
+
+  // For externalUrl, auto-populate _meta.csp.baseUriDomains with the origin
+  // so the sandbox iframe's CSP base-uri directive allows the injected <base> tag.
+  if (externalOrigin) {
+    const meta = (additionalProps._meta ?? {}) as Record<string, unknown>;
+    const existingCsp = (meta.csp ?? {}) as Record<string, unknown>;
+    const existingDomains = (existingCsp.baseUriDomains ?? []) as string[];
+    if (!existingDomains.includes(externalOrigin)) {
+      meta.csp = { ...existingCsp, baseUriDomains: [...existingDomains, externalOrigin] };
+    }
+    additionalProps._meta = meta;
   }
 
   let resource: UIResource['resource'];
@@ -84,17 +81,17 @@ export function createUIResource(options: CreateUIResourceOptions): UIResource {
     case 'text':
       resource = {
         uri: options.uri,
-        mimeType: mimeType as MimeType,
+        mimeType,
         text: actualContentString,
-        ...getAdditionalResourceProps(options),
+        ...additionalProps,
       };
       break;
     case 'blob':
       resource = {
         uri: options.uri,
-        mimeType: mimeType as MimeType,
+        mimeType,
         blob: utf8ToBase64(actualContentString),
-        ...getAdditionalResourceProps(options),
+        ...additionalProps,
       };
       break;
     default: {
@@ -113,93 +110,11 @@ export function createUIResource(options: CreateUIResourceOptions): UIResource {
 export type {
   CreateUIResourceOptions,
   ResourceContentPayload,
-  UIActionResult,
-  AdaptersConfig,
-  AppsSdkAdapterOptions,
 } from './types.js';
 
 // Re-export constants from @modelcontextprotocol/ext-apps via types.js
 // This allows users to import everything they need from @mcp-ui/server
 export { RESOURCE_URI_META_KEY, RESOURCE_MIME_TYPE } from './types.js';
-
-// Export adapters
-export { wrapHtmlWithAdapters, getAdapterMimeType } from './utils.js';
-export * from './adapters/index.js';
-
-export function postUIActionResult(result: UIActionResult): void {
-  if (window.parent) {
-    window.parent.postMessage(result, '*');
-  }
-}
-
-export const InternalMessageType = {
-  UI_MESSAGE_RECEIVED: 'ui-message-received',
-  UI_MESSAGE_RESPONSE: 'ui-message-response',
-
-  UI_SIZE_CHANGE: 'ui-size-change',
-
-  UI_LIFECYCLE_IFRAME_READY: 'ui-lifecycle-iframe-ready',
-  UI_LIFECYCLE_IFRAME_RENDER_DATA: 'ui-lifecycle-iframe-render-data',
-
-  UI_RAWHTML_CONTENT: 'ui-html-content',
-};
-
-export const ReservedUrlParams = {
-  WAIT_FOR_RENDER_DATA: 'waitForRenderData',
-} as const;
-
-export function uiActionResultToolCall(
-  toolName: string,
-  params: Record<string, unknown>,
-): UIActionResultToolCall {
-  return {
-    type: 'tool',
-    payload: {
-      toolName,
-      params,
-    },
-  };
-}
-
-export function uiActionResultPrompt(prompt: string): UIActionResultPrompt {
-  return {
-    type: 'prompt',
-    payload: {
-      prompt,
-    },
-  };
-}
-
-export function uiActionResultLink(url: string): UIActionResultLink {
-  return {
-    type: 'link',
-    payload: {
-      url,
-    },
-  };
-}
-
-export function uiActionResultIntent(
-  intent: string,
-  params: Record<string, unknown>,
-): UIActionResultIntent {
-  return {
-    type: 'intent',
-    payload: {
-      intent,
-      params,
-    },
-  };
-}
-
-export function uiActionResultNotification(message: string): UIActionResultNotification {
-  return {
-    type: 'notify',
-    payload: {
-      message,
-    },
-  };
-}
 
 // --- Experimental JSON-RPC helpers ---
 // These enable guest UIs to send custom JSON-RPC requests to the host's
