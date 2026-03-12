@@ -1,3 +1,15 @@
+# [7.0.0](https://github.com/MCP-UI-Org/mcp-ui/compare/client/v6.1.1...client/v7.0.0) (2026-03-12)
+
+
+### Bug Fixes
+
+* bump major for breaking change ([#187](https://github.com/MCP-UI-Org/mcp-ui/issues/187)) ([2223e76](https://github.com/MCP-UI-Org/mcp-ui/commit/2223e76b229559ae6f39d63dd581a08b52e35acd))
+
+
+### BREAKING CHANGES
+
+* failed to bump major in the last commit because of semantic release
+
 ## [6.1.1](https://github.com/MCP-UI-Org/mcp-ui/compare/client/v6.1.0...client/v6.1.1) (2026-03-12)
 
 
